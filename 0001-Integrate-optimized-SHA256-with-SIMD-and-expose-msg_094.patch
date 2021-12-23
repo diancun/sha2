@@ -1,0 +1,122 @@
+From 50039f7ea5f295d28b9d7e7b637c2bb247b82973 Mon Sep 17 00:00:00 2001
+From: Li Wei L <wei.l.li@intel.com>
+Date: Tue, 25 May 2021 18:12:50 +0800
+Subject: [PATCH] Integrate optimized SHA256 with SIMD and expose msg_schedule
+ 0.9.4
+
+Signed-off-by: Li Wei L <wei.l.li@intel.com>
+---
+ build.rs          |  8 ++++++++
+ src/lib.rs        |  5 +++++
+ src/sha256.rs     |  4 ++--
+ src/sha256/x86.rs | 41 +++++++++++++++++++++++++++++++++++++++--
+ 5 files changed, 56 insertions(+), 4 deletions(-)
+ create mode 100644 sha2/build.rs
+
+diff --git a/build.rs b/build.rs
+new file mode 100644
+index 0000000..1c19c40
+--- /dev/null
++++ b/build.rs
+@@ -0,0 +1,8 @@
++use std::{env, path::PathBuf};
++
++fn main() {
++        let library_name = "simdsha2block";
++        println!("cargo:rustc-link-lib=static={}", library_name);
++        println!("cargo:rustc-link-search=native=/usr/local/lib64/");
++}
++
+diff --git a/src/lib.rs b/src/lib.rs
+index 326211e..136d4ef 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -66,10 +66,15 @@ mod consts;
+ mod sha256;
+ mod sha512;
+ 
++#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
++pub use sha256::x86;
++
+ pub use digest::{self, Digest};
+ #[cfg(feature = "compress")]
+ pub use sha256::compress256;
+ pub use sha256::{Sha224, Sha256};
++#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
++pub use sha256::x86::{sha256_rounds, sha256_msg_schedule, sha256_msg_schedule_x8, sha256_msg_schedule_x4};
+ #[cfg(feature = "compress")]
+ pub use sha512::compress512;
+ pub use sha512::{Sha384, Sha512, Sha512Trunc224, Sha512Trunc256};
+diff --git a/src/sha256.rs b/src/sha256.rs
+index fcb959d..fe3001a 100644
+--- a/src/sha256.rs
++++ b/src/sha256.rs
+@@ -151,8 +151,8 @@ cfg_if::cfg_if! {
+                 sha2_asm::compress256(state, blocks);
+             }
+         }
+-        mod x86;
+-        use x86::compress;
++        pub mod x86;
++        pub use x86::{compress, sha256_rounds, sha256_msg_schedule};
+     } else if #[cfg(all(feature = "asm", target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))] {
+         mod soft;
+         mod aarch64;
+diff --git a/src/sha256/x86.rs b/src/sha256/x86.rs
+index 65ebff7..3f9c331 100644
+--- a/src/sha256/x86.rs
++++ b/src/sha256/x86.rs
+@@ -100,11 +100,48 @@ cpufeatures::new!(shani_cpuid, "sha", "sse2", "ssse3", "sse4.1");
+ pub fn compress(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+     // TODO: Replace with https://github.com/rust-lang/rfcs/pull/2725
+     // after stabilization
+-    if shani_cpuid::get() {
++    if true { //shani_cpuid::get() {
+         unsafe {
+-            digest_blocks(state, blocks);
++            //digest_blocks(state, blocks);
++            c_digest_blocks(state, blocks, blocks.len() as i32);
+         }
+     } else {
+         super::soft::compress(state, blocks);
+     }
+ }
++
++#[link(name = "simdsha2block", kind = "static")]
++extern "C" {
++    pub fn c_digest_blocks(state: &mut [u32; 8],  blocks: &[[u8; 64]], len: i32);
++    // void sha256_rounds(const uint8_t *p_msg_schedule, const uint64_t num_blk, uint8_t *digest)
++    pub fn sha256_rounds(p_msg_schedule: *const u8, num_blk: u64, digest: *mut u8);
++    // void sha256_msg_schedule(uint8_t *p_msg_schedule, const uint64_t num_blk, const uint8_t *p_msg_data)
++    pub fn sha256_msg_schedule(p_msg_schedule: *mut u8, num_blk: u64, p_msg_data: *const u8);
++    // void sha256_msg_schedule_x8(const uint8_t *in1, uint8_t *out1,
++    //                                 const uint8_t *in2, uint8_t *out2,
++    //                                 const uint8_t *in3, uint8_t *out3,
++    //                                 const uint8_t *in4, uint8_t *out4,
++    //                                 const uint8_t *in5, uint8_t *out5,
++    //                                 const uint8_t *in6, uint8_t *out6,
++    //                                 const uint8_t *in7, uint8_t *out7,
++    //                                 const uint8_t *in8, uint8_t *out8)
++    pub fn sha256_msg_schedule_x8(in1: *const u8, out1: *mut u8,
++                                  in2: *const u8, out2: *mut u8,
++                                  in3: *const u8, out3: *mut u8,
++                                  in4: *const u8, out4: *mut u8,
++                                  in5: *const u8, out5: *mut u8,
++                                  in6: *const u8, out6: *mut u8,
++                                  in7: *const u8, out7: *mut u8,
++                                  in8: *const u8, out8: *mut u8);
++
++    // void sha256_msg_schedule_x4(const uint8_t *in1, uint8_t *out1,
++    //                                 const uint8_t *in2, uint8_t *out2,
++    //                                 const uint8_t *in3, uint8_t *out3,
++    //                                 const uint8_t *in4, uint8_t *out4)
++    pub fn sha256_msg_schedule_x4(in1: *const u8, out1: *mut u8,
++                                  in2: *const u8, out2: *mut u8,
++                                  in3: *const u8, out3: *mut u8,
++                                  in4: *const u8, out4: *mut u8);
++
++}
++
+-- 
+2.25.1
+
